@@ -28,58 +28,28 @@ def get_prompt(file_path):
         prompt = file.read()
     return prompt
 
-def collect_llms(config):
+def get_agent(agent_config, llm_configs, tool_configs):
     """
-    Collect LLMs based on the configuration.
-    
-    Args:
-        config (dict): Configuration settings.
-    
-    Returns:
-        dict: Dictionary of LLM instances.
-    """
-    llms = {}
-    for llm, llm_config in config["llms"].items():
-        llm_instance = get_llm(llm_config)
-        llms[llm] = llm_instance
-    return llms
+    Get the agent based on the configuration.
 
-def collect_prompts(config):
-    """
-    Collect prompts based on the configuration.
-    
     Args:
-        config (dict): Configuration settings.
-    
-    Returns:
-        dict: Dictionary of prompts.
-    """
-    prompts = {}
-    for llm, llm_config in config["llms"].items():
-        prompt_content = get_prompt(llm_config["prompt"])
-        prompts[llm] = prompt_content
-    return prompts
+        agent_config (dict): Configuration settings for the agent.
+        llm_configs (dict): Configuration settings for the LLMs.
+        tool_configs (dict): Configuration settings for the tools.
 
-def collect_tools(config):
-    # TODO: Implement this function to collect tools based on the configuration.
-    pass
-
-def collect_agents(config):
-    """
-    Collect agents based on the configuration.
-    
-    Args:
-        config (dict): Configuration settings.
-    
     Returns:
-        dict: Dictionary of agents.
+        object: Agent instance.
     """
-    agents = {}
-    for llm, llm_config in config["llms"].items():
-        agent = create_react_agent(
-            llm=llm_config["llm"],
-            # tools=collect_tools(config),
-            prompt=llm_config["prompt"],
-        )
-        agents[llm] = agent
-    return agents
+
+    llm_config = llm_configs.get(agent_config['llm'])
+    llm = get_llm(llm_config)
+    prompt = get_prompt(agent_config["prompt"])
+    # tools = collect_tools(config["tools"])
+    agent = create_react_agent(
+        model=llm,
+        tools=[],
+        prompt=prompt,
+        # tools=tools,
+        # verbose=True,
+    )
+    return agent

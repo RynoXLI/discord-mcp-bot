@@ -19,7 +19,7 @@ def main():
     @bot.event
     async def on_connect():
         if bot.auto_sync_commands:
-            await bot.sync_commands( register_guild_commands=True, guild_ids=[675538935472062479])
+            await bot.sync_commands(register_guild_commands=True, guild_ids=[675538935472062479])
         print(f"{bot.user.name} connected.")
     
     print("Hello from discord-mcp-bot!")
