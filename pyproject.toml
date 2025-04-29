@@ -1,0 +1,22 @@
+[project]
+name = "discord-mcp-bot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "langchain-mcp-adapters>=0.0.9",
+    "langchain-openai>=0.3.14",
+    "langgraph>=0.3.34",
+    "py-cord>=2.6.1",
+    "python-dotenv>=1.1.0",
+    "pyyaml>=6.0.2",
+    "typer>=0.15.3",
+]
+
+[project.scripts]
+mcp-bot = "discord_mcp_bot:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -1,0 +1,75 @@
+
+llms:
+  openai:
+    module: "langchain_openai.chat_models" # module name for the LLM
+    class: "ChatOpenAI" # class name for the LLM
+    # these arguments are passed to the LLM defined in LangChain
+    params:
+      model: "gpt-4.1-nano"
+      temperature: 0.7
+      max_tokens: 1000
+      top_p: 0.9
+      # api_key: $OPENAI_API_KEY # use the environment variable for the API key
+      api_key: "secret"
+
+mcpServers:
+  discordMCP:
+    command: []
+    args: []
+    env: []
+
+    # custom definition for types of tools to use
+    tools: # 
+      - name: "default"
+        command: false # whether to expose the tool as a discord command
+        allow: true # whether to allow all tools to be used
+      - name: "get_user" # name of the tool as seen in the MCP server
+        allow: true
+        command: false # whether to expose the tool as a discord command
+      - name: "get_channel"
+        allow: false
+        command: false
+    
+agents:
+  ## define server connections here
+  bot1:
+    # discord command name
+    command: "ask"
+    # location of the prompt file in the repository
+    prompt: prompts/bot1.txt
+    # define the LLM connection for this server
+    llm: openai
+    # define MCP connection for this server
+    mcpServers:
+     - discordMCP
+
+  bot2:
+    # discord command name
+    command: "ask_openai"
+    # location of the prompt file in the repository
+    prompt: prompts/bot2.txt
+    # define the LLM connection for this server
+    llm: openai
+    mcpServers:
+      discordMCP:
+        tools: # custom definition for types of tools to use per bot
+        - name: "get_user" # name of the tool as seen in the MCP server
+          allow: false
+          command: true # whether to expose the tool as a discord command
+
+discord:
+  guilds:
+    # define guilds for this server
+    - guild1:
+        channels:
+          - channel1
+          - channel2
+        bots:
+          - bot1
+          - bot2
+    - guild2:   
+        channels:
+          - channel3
+          - channel4
+        bots:
+          - bot1
