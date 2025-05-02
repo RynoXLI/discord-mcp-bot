@@ -3,7 +3,7 @@ from pathlib import Path
 import os
 from dotenv import load_dotenv
 from discord_mcp_bot.config import load_config
-from discord_mcp_bot.cogs import MCPAgent
+from discord_mcp_bot.cogs import agent
 from discord_mcp_bot.bot import MCPBot
 import discord
 
@@ -14,7 +14,7 @@ def main():
     config = load_config(config_path)
     
     bot = MCPBot(config)
-    bot.load_extension("discord_mcp_bot.cogs.MCPAgent")
+    bot.load_extension("discord_mcp_bot.cogs.agent")
 
     @bot.event
     async def on_connect():

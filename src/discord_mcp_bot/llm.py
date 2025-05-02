@@ -1,5 +1,8 @@
 import importlib
 from langgraph.prebuilt import create_react_agent
+from contextlib import asynccontextmanager
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 
 def get_llm(config):
     """
@@ -28,7 +31,26 @@ def get_prompt(file_path):
         prompt = file.read()
     return prompt
 
-def get_agent(agent_config, llm_configs, tool_configs):
+def get_tools(agent_tools, tool_configs) -> list:
+    """
+    Get the tools based on the configuration.
+    
+    Args:
+        agent_tools (list): List of tools to be used by the agent.
+        tool_configs (list): List of tool configurations.
+        
+    Returns:
+        list: Subset of tool configs.
+    """
+    tools = {}
+    for tool in agent_tools:
+        tool_cfg = tool_configs.get(tool)
+        if tool_cfg:
+            tools[tool] = tool_cfg
+    return tools
+
+@asynccontextmanager
+async def get_agent(agent_config, llm_configs, tool_configs):
     """
     Get the agent based on the configuration.
 
@@ -44,12 +66,38 @@ def get_agent(agent_config, llm_configs, tool_configs):
     llm_config = llm_configs.get(agent_config['llm'])
     llm = get_llm(llm_config)
     prompt = get_prompt(agent_config["prompt"])
-    # tools = collect_tools(config["tools"])
-    agent = create_react_agent(
-        model=llm,
-        tools=[],
-        prompt=prompt,
-        # tools=tools,
-        # verbose=True,
+    mcp_configs = get_tools(agent_config["mcpServers"], tool_configs)
+    print(mcp_configs)
+
+    async with MultiServerMCPClient(mcp_configs) as mcp_client:
+        agent = create_react_agent(
+            model=llm,
+            tools=mcp_client.get_tools(),
+            prompt=prompt,
+        )
+        yield agent
+
+async def get_thread_name(llm_name, llm_configs, question):
+    """
+    Get the thread name based on the LLM name and question.
+
+    Args:
+        llm_name (str): Name of the LLM.
+        llm_configs (dict): Configuration settings for the LLMs.
+        question (str): Question to be asked.
+
+    Returns:
+        str: Thread name.
+    """
+    llm_config = llm_configs.get(llm_name)
+    llm = get_llm(llm_config)
+    prompt = get_prompt("prompts/thread_name.txt")
+    prompt = prompt if prompt.strip() else "You are a helpful assistant that summarizes questions or queries into Discord thread names."
+
+    response = await llm.invoke(
+        {
+            "messages": [SystemMessage(content=prompt),
+                         HumanMessage(content=question)],
+        }
     )
-    return agent
+    return response.content
