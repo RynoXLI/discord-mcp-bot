@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import yaml
 import discord
 from discord.ext import commands
 from datetime import datetime, timedelta
@@ -108,23 +109,21 @@ class ConversationManager:
                     tool_name = tool.name
                     # Find which server this tool belongs to by checking tool configurations
                     should_include = True
-                    
-                    # Check each server's tool filtering configuration
+                      # Check each server's tool filtering configuration
                     for server_name, server_config in self.mcp_servers.items():
                         tool_config = server_config.get('tools', {})
                         if not tool_config:
                             continue
                             
                         mode = tool_config.get('mode', 'none')
+                        tool_list = tool_config.get('list', [])
                         
                         if mode == 'allow':
-                            allowlist = tool_config.get('allowlist', [])
-                            if tool_name not in allowlist:
+                            if tool_name not in tool_list:
                                 should_include = False
                                 break
                         elif mode == 'ban':
-                            banlist = tool_config.get('banlist', [])
-                            if tool_name in banlist:
+                            if tool_name in tool_list:
                                 should_include = False
                                 break
                     
@@ -371,8 +370,7 @@ class ConversationManager:
             "system_prompt": self.system_prompt[:100] + "..." if len(self.system_prompt) > 100 else self.system_prompt,
             "mcp_servers": list(self.mcp_servers.keys()) if self.mcp_servers else [],
         }
-        
-        # Add tool filtering information for each server
+          # Add tool filtering information for each server
         tool_filtering_info = {}
         for server_name, server_config in self.mcp_servers.items():
             tool_config = server_config.get('tools', {})
@@ -380,10 +378,8 @@ class ConversationManager:
                 filter_mode = tool_config.get('mode', 'none')
                 filter_info = {"mode": filter_mode}
                 
-                if filter_mode == 'allow':
-                    filter_info["allowlist"] = tool_config.get('allowlist', [])
-                elif filter_mode == 'ban':
-                    filter_info["banlist"] = tool_config.get('banlist', [])
+                if filter_mode in ['allow', 'ban']:
+                    filter_info["list"] = tool_config.get('list', [])
                     
                 tool_filtering_info[server_name] = filter_info
                 
@@ -527,186 +523,547 @@ async def on_message(message):
             )
 
         # Send response (potentially split into multiple messages)
-        await send_long_response(message, llm_response)
-
-    # Handle debug commands
-    if message.content.startswith("$hello"):
-        await message.channel.send("Hello!")
-    elif message.content.startswith("$config"):
-        config_summary = conversation_manager.get_config_summary()
-        config_text = json.dumps(config_summary, indent=2)
-        await message.channel.send(
-            f"**Bot Configuration:**\n```json\n{config_text}\n```"
-        )
-    elif message.content.startswith("$tools"):
-        # Show available tools (requires MCP servers to be configured)
-        if conversation_manager.mcp_servers:
-            try:
-                # Get tools directly from the MCP client instead of from agent
-                async with MultiServerMCPClient(conversation_manager.mcp_servers) as mcp_client:
-                    all_tools = mcp_client.get_tools()
-                    
-                    # Apply the same filtering logic as in get_agent
-                    filtered_tools = []
-                    for tool in all_tools:
-                        tool_name = tool.name
-                        should_include = True
-                        
-                        # Check each server's tool filtering configuration
-                        for server_name, server_config in conversation_manager.mcp_servers.items():
-                            tool_config = server_config.get('tools', {})
-                            if not tool_config:
-                                continue
-                                
-                            mode = tool_config.get('mode', 'none')
-                            
-                            if mode == 'allow':
-                                allowlist = tool_config.get('allowlist', [])
-                                if tool_name not in allowlist:
-                                    should_include = False
-                                    break
-                            elif mode == 'ban':
-                                banlist = tool_config.get('banlist', [])
-                                if tool_name in banlist:
-                                    should_include = False
-                                    break
-                        
-                        if should_include:
-                            filtered_tools.append(tool)
-                    
-                    if filtered_tools:
-                        tool_info = []
-                        for tool in filtered_tools:
-                            tool_name = tool.name
-                            tool_description = getattr(tool, 'description', 'No description available')
-                            tool_info.append(f"• **{tool_name}**: {tool_description}")
-                        
-                        tools_text = "\n".join(tool_info)
-                          # Get filtering info from server configurations
-                        filter_info = []
-                        for server_name, server_config in conversation_manager.mcp_servers.items():
-                            tool_config = server_config.get('tools', {})
-                            if tool_config:
-                                mode = tool_config.get('mode', 'none')
-                                filter_info.append(f"{server_name}: {mode}")
-                        
-                        filter_summary = ", ".join(filter_info) if filter_info else "none"
-                        response = f"**Available MCP Tools** (Filtering: {filter_summary}):\n{tools_text}\n\n**Total:** {len(filtered_tools)}/{len(all_tools)} tools available"
-                        
-                        if len(response) > 2000:
-                            # Split long responses
-                            await send_long_response(message, response)
-                        else:
-                            await message.channel.send(response)
-                    else:
-                        await message.channel.send("No tools available after filtering.")
-            except Exception as e:
-                await message.channel.send(f"Error getting tool information: {e}")
-        else:
-            await message.channel.send("No MCP servers configured. Tools are not available.")
+        await send_long_response(message, llm_response)    # Handle debug commands
+    elif message.content.startswith("$ping"):
+        # Simple ping command to check bot responsiveness
+        await message.channel.send("Pong! 🏓")
 
     # Process commands (required for slash commands to work alongside message events)
     await bot.process_commands(message)
 
 
 # Slash commands
-@bot.slash_command(name="tools", description="Show available MCP tools with filtering information")
-async def tools_slash(ctx):
-    """Show available tools as a slash command"""
-    await ctx.defer()  # Important for commands that might take time
+@bot.slash_command(name="tools", description="Show tool information")
+async def tools_slash(
+    ctx, 
+    mode: str = discord.Option(
+        default="current",
+        description="What to show",
+        choices=[
+            discord.OptionChoice(name="Current configuration", value="current"),
+            discord.OptionChoice(name="All available tools", value="all")
+        ]
+    )
+):
+    """Simplified tools command with Discord embed"""
+    await ctx.defer()
     
-    if conversation_manager.mcp_servers:
-        try:
-            # Get tools directly from the MCP client instead of from agent
-            async with MultiServerMCPClient(conversation_manager.mcp_servers) as mcp_client:
-                all_tools = mcp_client.get_tools()
-                
-                # Apply the same filtering logic as in get_agent
-                filtered_tools = []
-                for tool in all_tools:
-                    tool_name = tool.name
-                    should_include = True
+    if not conversation_manager.mcp_servers:
+        embed = discord.Embed(
+            title="⚠️ No MCP Servers", 
+            description="No MCP servers configured. Tools are not available.",
+            color=discord.Color.orange()
+        )
+        await ctx.followup.send(embed=embed)
+        return
+    
+    try:
+        async with MultiServerMCPClient(conversation_manager.mcp_servers) as mcp_client:
+            all_tools = mcp_client.get_tools()
+            
+            if mode == "all":
+                # Show all available tools
+                if all_tools:
+                    embed = discord.Embed(
+                        title="🛠️ All Available Tools",
+                        description=f"Total: **{len(all_tools)}** tools available",
+                        color=discord.Color.blue()
+                    )
                     
-                    # Check each server's tool filtering configuration
-                    for server_name, server_config in conversation_manager.mcp_servers.items():
-                        tool_config = server_config.get('tools', {})
-                        if not tool_config:
-                            continue
-                            
-                        mode = tool_config.get('mode', 'none')
+                    tool_names = sorted([tool.name for tool in all_tools])
+                    
+                    # Group tools in chunks for better display
+                    chunk_size = 20
+                    for i in range(0, len(tool_names), chunk_size):
+                        chunk = tool_names[i:i + chunk_size]
+                        chunk_text = "\n".join([f"• `{tool}`" for tool in chunk])
                         
-                        if mode == 'allow':
-                            allowlist = tool_config.get('allowlist', [])
-                            if tool_name not in allowlist:
-                                should_include = False
-                                break
-                        elif mode == 'ban':
-                            banlist = tool_config.get('banlist', [])
-                            if tool_name in banlist:
-                                should_include = False
-                                break
+                        field_name = f"Tools {i+1}-{min(i+chunk_size, len(tool_names))}"
+                        embed.add_field(name=field_name, value=chunk_text, inline=True)
+                        
+                        # Discord has a limit of 25 fields per embed
+                        if len(embed.fields) >= 24:
+                            break
                     
-                    if should_include:
-                        filtered_tools.append(tool)
-                
-                if filtered_tools:
-                    tool_info = []
-                    for tool in filtered_tools:
-                        tool_name = tool.name
-                        tool_description = getattr(tool, 'description', 'No description available')
-                        tool_info.append(f"• **{tool_name}**: {tool_description}")
+                    if len(tool_names) > chunk_size * 24:
+                        embed.add_field(
+                            name="Note", 
+                            value=f"Showing first {chunk_size * 24} tools. Use `/tools current` to see filtering configuration.",
+                            inline=False
+                        )
                     
-                    tools_text = "\n".join(tool_info)
-                    
-                    # Get filtering info from server configurations
-                    filter_info = []
-                    for server_name, server_config in conversation_manager.mcp_servers.items():
-                        tool_config = server_config.get('tools', {})
-                        if tool_config:
-                            mode = tool_config.get('mode', 'none')
-                            filter_info.append(f"{server_name}: {mode}")
-                    
-                    filter_summary = ", ".join(filter_info) if filter_info else "none"
-                    response = f"**Available MCP Tools** (Filtering: {filter_summary}):\n{tools_text}\n\n**Total:** {len(filtered_tools)}/{len(all_tools)} tools available"
-                    
-                    if len(response) > 2000:
-                        # Split long responses using followup for slash commands
-                        await ctx.followup.send(response[:2000])
-                        remaining = response[2000:]
-                        while remaining:
-                            chunk = remaining[:2000]
-                            remaining = remaining[2000:]
-                            await ctx.followup.send(chunk)
-                    else:
-                        await ctx.followup.send(response)
+                    await ctx.followup.send(embed=embed)
                 else:
-                    await ctx.followup.send("No tools available after filtering.")
-        except Exception as e:
-            await ctx.followup.send(f"Error getting tool information: {e}")
-    else:
-        await ctx.followup.send("No MCP servers configured. Tools are not available.")
+                    embed = discord.Embed(
+                        title="❌ No Tools Available",
+                        description="No tools available from MCP servers",
+                        color=discord.Color.red()
+                    )
+                    await ctx.followup.send(embed=embed)
+                    
+            else:  # mode == "current"
+                # Show current configuration
+                embed = discord.Embed(
+                    title="⚙️ Current Tool Configuration",
+                    description="Tool filtering settings for each MCP server",
+                    color=discord.Color.green()
+                )
+                
+                for server_name, server_config in conversation_manager.mcp_servers.items():
+                    tool_config = server_config.get('tools', {})
+                    
+                    if tool_config:
+                        filter_mode = tool_config.get('mode', 'none')
+                        tool_list = tool_config.get('list', [])
+                        
+                        # Choose emoji based on mode
+                        mode_emoji = {
+                            'allow': '✅',
+                            'ban': '❌', 
+                            'none': '🔓'                        }.get(filter_mode, '❓')
+                        
+                        field_value = f"{mode_emoji} **Mode:** `{filter_mode}`\n"
+                        
+                        if filter_mode in ['allow', 'ban'] and tool_list:
+                            list_name = "Allowed" if filter_mode == 'allow' else "Banned"
+                            # Display all tools without truncation
+                            if len(tool_list) <= 10:
+                                # For smaller lists, show inline
+                                tools_display = ', '.join([f"`{tool}`" for tool in tool_list])
+                                field_value += f"**{list_name} tools ({len(tool_list)}):** {tools_display}"
+                            else:
+                                # For larger lists, show as bullet points
+                                tools_display = '\n'.join([f"• `{tool}`" for tool in tool_list[:15]])
+                                if len(tool_list) > 15:
+                                    tools_display += f"\n• ... and {len(tool_list)-15} more"
+                                field_value += f"**{list_name} tools ({len(tool_list)}):**\n{tools_display}"
+                        elif filter_mode in ['allow', 'ban']:
+                            list_name = "Allowed" if filter_mode == 'allow' else "Banned"
+                            field_value += f"**{list_name} tools:** (none configured)"
+                        else:
+                            field_value += "**Status:** All tools allowed"
+                    else:
+                        field_value = "🔓 **Mode:** `none`\n**Status:** All tools allowed (no filtering)"
+                    
+                    embed.add_field(name=f"📡 {server_name}", value=field_value, inline=False)
+                
+                embed.set_footer(text="Use /set-mode, /add-tool, /remove-tool to configure filtering")
+                await ctx.followup.send(embed=embed)
+                    
+    except Exception as e:
+        embed = discord.Embed(
+            title="❌ Error",
+            description=f"Error getting tool information: {e}",
+            color=discord.Color.red()
+        )
+        await ctx.followup.send(embed=embed)
 
 @bot.slash_command(name="config", description="Show bot configuration")
 async def config_slash(ctx):
-    """Show bot configuration as a slash command"""
+    """Show bot configuration as a Discord embed"""
     await ctx.defer()
     
     config_summary = conversation_manager.get_config_summary()
-    config_text = json.dumps(config_summary, indent=2)
-    response = f"**Bot Configuration:**\n```json\n{config_text}\n```"
     
-    if len(response) > 2000:
-        await ctx.followup.send("**Bot Configuration:**\n```json")
-        await ctx.followup.send(config_text[:1900] + "\n```")
-        if len(config_text) > 1900:
-            await ctx.followup.send("```json\n" + config_text[1900:] + "\n```")
-    else:
-        await ctx.followup.send(response)
+    embed = discord.Embed(
+        title="🤖 Bot Configuration",
+        description="Current bot settings and configuration",
+        color=discord.Color.blue()
+    )
+    
+    # Basic configuration
+    embed.add_field(
+        name="🧠 LLM Configuration",
+        value=f"**Model:** `{config_summary.get('llm_class', 'Unknown')}`\n**Max Tokens:** {config_summary.get('max_tokens', 'Unknown')}",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="💬 Conversation Settings", 
+        value=f"**Max Messages:** {config_summary.get('max_messages', 'Unknown')}\n**Time Window:** {config_summary.get('max_time_window_minutes', 'Unknown')} min",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="🔧 Features",
+        value=f"**Token Trimming:** {'✅' if config_summary.get('has_token_trimming') else '❌'}\n**MCP Servers:** {len(config_summary.get('mcp_servers', []))}",
+        inline=True
+    )
+    
+    # MCP Servers
+    if config_summary.get('mcp_servers'):
+        servers_text = '\n'.join([f"• `{server}`" for server in config_summary['mcp_servers']])
+        embed.add_field(
+            name="📡 MCP Servers",
+            value=servers_text,
+            inline=False
+        )
+    
+    # Tool filtering info
+    if config_summary.get('tool_filtering'):
+        filtering_text = ""
+        for server, filter_info in config_summary['tool_filtering'].items():
+            mode = filter_info.get('mode', 'none')
+            tool_count = len(filter_info.get('list', []))
+            mode_emoji = {'allow': '✅', 'ban': '❌', 'none': '🔓'}.get(mode, '❓')
+            filtering_text += f"{mode_emoji} **{server}:** `{mode}` ({tool_count} tools)\n"
+        
+        embed.add_field(
+            name="🛠️ Tool Filtering",
+            value=filtering_text,
+            inline=False
+        )
+    
+    # System prompt preview
+    system_prompt = config_summary.get('system_prompt', '')
+    if system_prompt:
+        prompt_preview = system_prompt[:100] + "..." if len(system_prompt) > 100 else system_prompt
+        embed.add_field(
+            name="📝 System Prompt",
+            value=f"```{prompt_preview}```",
+            inline=False
+        )
+    
+    embed.set_footer(text="Use /tools to see detailed tool configuration")
+    await ctx.followup.send(embed=embed)
 
 @bot.slash_command(name="hello", description="Say hello!")
 async def hello_slash(ctx):
     """Simple hello command as a slash command"""
     await ctx.respond("Hello! 👋")
+
+
+# Configuration management functions
+def save_config(config_data, file_path="configuration.yml"):
+    """Save configuration back to YAML file"""
+    with open(file_path, 'w') as file:
+        yaml.dump(config_data, file, default_flow_style=False, indent=2)
+
+
+async def get_available_tools():
+    """Get all available tools from MCP servers"""
+    if not conversation_manager.mcp_servers:
+        return []
+    
+    try:
+        async with MultiServerMCPClient(conversation_manager.mcp_servers) as mcp_client:
+            return [tool.name for tool in mcp_client.get_tools()]
+    except Exception as e:
+        print(f"Error getting tools: {e}")
+        return []
+
+
+def reload_conversation_manager():
+    """Reload the conversation manager with updated config"""
+    global conversation_manager, config
+    # Reload config from file
+    config = load_config("configuration.yml")
+    conversation_manager.mcp_servers = config.get('mcpServers', {})
+
+
+# Tool management slash commands - simplified
+@bot.slash_command(name="set-mode", description="Set tool filtering mode and update the list")
+async def set_mode(
+    ctx, 
+    server: str = discord.Option(description="MCP server name"),
+    mode: str = discord.Option(
+        description="Filtering mode", 
+        choices=[
+            discord.OptionChoice(name="Allow only listed tools", value="allow"),
+            discord.OptionChoice(name="Ban listed tools", value="ban"),
+            discord.OptionChoice(name="No filtering (allow all)", value="none")
+        ]
+    )
+):
+    """Set the filtering mode for an MCP server"""
+    await ctx.defer()
+    
+    # Check if server exists
+    if server not in config.get('mcpServers', {}):
+        available_servers = list(config.get('mcpServers', {}).keys())
+        embed = discord.Embed(
+            title="❌ Server Not Found",
+            description=f"Server `{server}` not found.",
+            color=discord.Color.red()
+        )
+        if available_servers:
+            embed.add_field(
+                name="Available Servers",
+                value=", ".join([f"`{s}`" for s in available_servers]),
+                inline=False
+            )
+        await ctx.followup.send(embed=embed)
+        return
+    
+    # Update configuration
+    if 'tools' not in config['mcpServers'][server]:
+        config['mcpServers'][server]['tools'] = {}
+    
+    # Get current list or create empty one
+    current_list = config['mcpServers'][server]['tools'].get('list', [])
+    
+    config['mcpServers'][server]['tools']['mode'] = mode
+    config['mcpServers'][server]['tools']['list'] = current_list
+    
+    # Save configuration
+    try:
+        save_config(config)
+        reload_conversation_manager()
+        
+        # Create success embed
+        mode_emoji = {'allow': '✅', 'ban': '❌', 'none': '🔓'}.get(mode, '❓')
+        embed = discord.Embed(
+            title=f"{mode_emoji} Mode Updated",
+            description=f"Successfully updated filtering mode for `{server}`",
+            color=discord.Color.green()        )
+        
+        embed.add_field(name="Server", value=f"`{server}`", inline=True)
+        embed.add_field(name="New Mode", value=f"`{mode}`", inline=True)
+        
+        if mode == 'none':
+            embed.add_field(name="Status", value="All tools allowed", inline=False)
+        else:
+            list_desc = "allowed" if mode == "allow" else "banned"
+            if len(current_list) <= 10:
+                list_summary = ", ".join([f"`{tool}`" for tool in current_list])
+            else:
+                list_summary = ", ".join([f"`{tool}`" for tool in current_list[:10]])
+                list_summary += f" ... and {len(current_list)-10} more"
+            
+            if not current_list:
+                list_summary = "(empty)"
+            
+            embed.add_field(
+                name=f"{list_desc.title()} Tools ({len(current_list)})",
+                value=list_summary,
+                inline=False
+            )
+        
+        await ctx.followup.send(embed=embed)
+    except Exception as e:
+        embed = discord.Embed(
+            title="❌ Configuration Error",
+            description=f"Error saving configuration: {e}",
+            color=discord.Color.red()
+        )
+        await ctx.followup.send(embed=embed)
+
+
+@bot.slash_command(name="add-tool", description="Add a tool to the filter list")
+async def add_tool(
+    ctx, 
+    server: str = discord.Option(description="MCP server name"),
+    tool_name: str = discord.Option(description="Name of the tool to add")
+):
+    """Add a tool to the current filter list"""
+    await ctx.defer()
+    
+    # Check if server exists
+    if server not in config.get('mcpServers', {}):
+        available_servers = list(config.get('mcpServers', {}).keys())
+        embed = discord.Embed(
+            title="❌ Server Not Found",
+            description=f"Server `{server}` not found.",
+            color=discord.Color.red()
+        )
+        if available_servers:
+            embed.add_field(
+                name="Available Servers",
+                value=", ".join([f"`{s}`" for s in available_servers]),
+                inline=False
+            )
+        await ctx.followup.send(embed=embed)
+        return
+    
+    # Check if tool exists
+    available_tools = await get_available_tools()
+    if tool_name not in available_tools:
+        embed = discord.Embed(
+            title="❌ Tool Not Found",
+            description=f"Tool `{tool_name}` not found in available tools.",
+            color=discord.Color.red()
+        )
+        if available_tools:
+            tools_preview = ", ".join([f"`{tool}`" for tool in available_tools[:10]])
+            if len(available_tools) > 10:
+                tools_preview += f" ... +{len(available_tools)-10} more"
+            embed.add_field(
+                name=f"Available Tools ({len(available_tools)} total)",
+                value=tools_preview,
+                inline=False
+            )
+        await ctx.followup.send(embed=embed)
+        return
+    
+    # Initialize tools config if needed
+    if 'tools' not in config['mcpServers'][server]:
+        config['mcpServers'][server]['tools'] = {'mode': 'none', 'list': []}
+    if 'list' not in config['mcpServers'][server]['tools']:
+        config['mcpServers'][server]['tools']['list'] = []
+    
+    # Add tool if not already in list
+    tool_list = config['mcpServers'][server]['tools']['list']
+    mode = config['mcpServers'][server]['tools'].get('mode', 'none')
+    
+    if tool_name not in tool_list:
+        tool_list.append(tool_name)
+        
+        try:
+            save_config(config)
+            reload_conversation_manager()
+            
+            embed = discord.Embed(
+                title="✅ Tool Added",
+                description=f"Successfully added `{tool_name}` to filter list",
+                color=discord.Color.green()
+            )
+            
+            embed.add_field(name="Server", value=f"`{server}`", inline=True)
+            embed.add_field(name="Tool", value=f"`{tool_name}`", inline=True)
+            embed.add_field(name="Current Mode", value=f"`{mode}`", inline=True)
+            
+            if mode == 'none':
+                embed.add_field(
+                    name="💡 Note",
+                    value="Mode is `none` so this list isn't active yet. Use `/set-mode` to enable filtering.",
+                    inline=False
+                )
+            else:
+                list_type = "allowed" if mode == "allow" else "banned"
+                embed.add_field(
+                    name="Status",
+                    value=f"Tool is now in the {list_type} list",
+                    inline=False
+                )
+            
+            # Show current list size
+            embed.set_footer(text=f"Total tools in list: {len(tool_list)}")
+            
+            await ctx.followup.send(embed=embed)
+        except Exception as e:
+            embed = discord.Embed(
+                title="❌ Configuration Error",
+                description=f"Error saving configuration: {e}",
+                color=discord.Color.red()
+            )
+            await ctx.followup.send(embed=embed)
+    else:
+        list_type = "allowed" if mode == "allow" else "banned" if mode == "ban" else "filter"
+        embed = discord.Embed(
+            title="⚠️ Tool Already Exists",
+            description=f"Tool `{tool_name}` is already in the {list_type} list for `{server}`",
+            color=discord.Color.orange()
+        )
+        embed.set_footer(text=f"Total tools in list: {len(tool_list)}")
+        await ctx.followup.send(embed=embed)
+
+
+@bot.slash_command(name="remove-tool", description="Remove a tool from the filter list")
+async def remove_tool(
+    ctx, 
+    server: str = discord.Option(description="MCP server name"),
+    tool_name: str = discord.Option(description="Name of the tool to remove")
+):
+    """Remove a tool from the current filter list"""
+    await ctx.defer()
+    
+    # Check if server exists
+    if server not in config.get('mcpServers', {}):
+        available_servers = list(config.get('mcpServers', {}).keys())
+        embed = discord.Embed(
+            title="❌ Server Not Found",
+            description=f"Server `{server}` not found.",
+            color=discord.Color.red()
+        )
+        if available_servers:
+            embed.add_field(
+                name="Available Servers",
+                value=", ".join([f"`{s}`" for s in available_servers]),
+                inline=False
+            )
+        await ctx.followup.send(embed=embed)
+        return
+    
+    # Check if tools config exists
+    if 'tools' not in config['mcpServers'][server] or 'list' not in config['mcpServers'][server]['tools']:
+        embed = discord.Embed(
+            title="❌ No Tool List",
+            description=f"No tool list found for server `{server}`",
+            color=discord.Color.red()
+        )
+        embed.add_field(
+            name="💡 Tip",
+            value="Use `/add-tool` to create a tool list or `/set-mode` to configure filtering",
+            inline=False
+        )
+        await ctx.followup.send(embed=embed)
+        return
+    
+    # Remove tool if in list
+    tool_list = config['mcpServers'][server]['tools']['list']
+    mode = config['mcpServers'][server]['tools'].get('mode', 'none')
+    
+    if tool_name in tool_list:
+        tool_list.remove(tool_name)
+        
+        try:
+            save_config(config)
+            reload_conversation_manager()
+            
+            embed = discord.Embed(
+                title="✅ Tool Removed",
+                description=f"Successfully removed `{tool_name}` from filter list",
+                color=discord.Color.green()
+            )
+            
+            embed.add_field(name="Server", value=f"`{server}`", inline=True)
+            embed.add_field(name="Tool", value=f"`{tool_name}`", inline=True)
+            embed.add_field(name="Current Mode", value=f"`{mode}`", inline=True)
+            
+            list_type = "allowed" if mode == "allow" else "banned" if mode == "ban" else "filter"
+            embed.add_field(
+                name="Status",
+                value=f"Tool removed from {list_type} list",
+                inline=False
+            )
+            
+            # Show remaining list size
+            embed.set_footer(text=f"Remaining tools in list: {len(tool_list)}")
+            
+            await ctx.followup.send(embed=embed)
+        except Exception as e:
+            embed = discord.Embed(
+                title="❌ Configuration Error",
+                description=f"Error saving configuration: {e}",
+                color=discord.Color.red()
+            )
+            await ctx.followup.send(embed=embed)
+    else:
+        embed = discord.Embed(
+            title="⚠️ Tool Not Found",
+            description=f"Tool `{tool_name}` is not in the tool list for `{server}`",
+            color=discord.Color.orange()
+        )
+        
+        if tool_list:
+            tools_preview = ", ".join([f"`{tool}`" for tool in tool_list[:10]])
+            if len(tool_list) > 10:
+                tools_preview += f" ... +{len(tool_list)-10} more"
+            embed.add_field(
+                name=f"Current Tools in List ({len(tool_list)})",
+                value=tools_preview,
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="Current Status",
+                value="Tool list is empty",
+                inline=False
+            )
+        
+        await ctx.followup.send(embed=embed)
+
+
 
 @bot.event
 async def on_connect():
