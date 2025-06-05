@@ -1,6 +1,8 @@
 import os
 import json
+import logging
 import discord
+from discord.ext import commands
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from langchain_core.messages import (
@@ -9,11 +11,18 @@ from langchain_core.messages import (
     SystemMessage,
     trim_messages,
 )
+from contextlib import asynccontextmanager
+from langgraph.prebuilt import create_react_agent
+from langchain_mcp_adapters.client import MultiServerMCPClient
 from .config import load_config
 from .llm import get_llm, get_prompt
 from langchain_core.messages.utils import count_tokens_approximately
 
 load_dotenv()
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Load configuration
 config = load_config("configuration.yml")
@@ -33,19 +42,21 @@ except FileNotFoundError:
 intents = discord.Intents.default()
 intents.message_content = True
 
-client = discord.Client(intents=intents)
+# Use commands.Bot instead of discord.Client to support slash commands
+bot = commands.Bot(command_prefix='$', intents=intents)
 
 
 class ConversationManager:
     """
-    Manages conversation context and LLM interactions for the Discord bot.
+    Manages conversation context and LLM interactions for the Discord bot using an agent with MCP tools.
     """
-
+    
     def __init__(
         self,
         llm,
         system_prompt,
         discord_client,
+        mcp_servers=None,
         max_messages=10,
         max_time_window_minutes=30,
         max_tokens=4096,
@@ -57,25 +68,81 @@ class ConversationManager:
             llm: The LLM instance to use for responses
             system_prompt: The system prompt to use
             discord_client: The Discord client instance
+            mcp_servers: Dictionary of MCP server configurations
             max_messages: Default maximum number of messages to retrieve
-            max_time_window_minutes: Default time window for channel mode (in minutes)
-            max_tokens: Maximum tokens for LLM context trimming
+            max_time_window_minutes: Default time window for channel mode (in minutes)            max_tokens: Maximum tokens for LLM context trimming
         """
+        
         self.llm = llm
         self.system_prompt = system_prompt
         self.discord_client = discord_client
+        self.mcp_servers = mcp_servers or {}
         self.max_messages = max_messages
         self.max_time_window_minutes = max_time_window_minutes
         self.max_tokens = max_tokens
-
-        # Trim messages to avoid exceeding token limits
-        trimmer = trim_messages(
+        
+        # Create a trimmer for token management
+        self.trimmer = trim_messages(
             strategy="last",
             max_tokens=max_tokens,
             include_system=True,
             token_counter=count_tokens_approximately,
         )
-        self.chain = trimmer | llm
+
+    @asynccontextmanager
+    async def get_agent(self):
+        """
+        Create and yield an agent with MCP tools, applying tool filtering.
+        
+        Returns:
+            Agent instance with filtered MCP tools
+        """
+        if self.mcp_servers:
+            async with MultiServerMCPClient(self.mcp_servers) as mcp_client:
+                # Get all available tools
+                all_tools = mcp_client.get_tools()
+                
+                # Apply tool filtering for each server
+                filtered_tools = []
+                for tool in all_tools:
+                    tool_name = tool.name
+                    # Find which server this tool belongs to by checking tool configurations
+                    should_include = True
+                    
+                    # Check each server's tool filtering configuration
+                    for server_name, server_config in self.mcp_servers.items():
+                        tool_config = server_config.get('tools', {})
+                        if not tool_config:
+                            continue
+                            
+                        mode = tool_config.get('mode', 'none')
+                        
+                        if mode == 'allow':
+                            allowlist = tool_config.get('allowlist', [])
+                            if tool_name not in allowlist:
+                                should_include = False
+                                break
+                        elif mode == 'ban':
+                            banlist = tool_config.get('banlist', [])
+                            if tool_name in banlist:
+                                should_include = False
+                                break
+                    
+                    if should_include:
+                        filtered_tools.append(tool)
+                
+                # print(f"MCP Tools loaded: {len(filtered_tools)}/{len(all_tools)} tools available")
+                
+                agent = create_react_agent(
+                    model=self.llm,
+                    tools=filtered_tools,
+                    prompt=self.system_prompt,
+                )
+                yield agent
+        else:
+            # Fallback to simple chain if no MCP servers
+            chain = self.trimmer | self.llm
+            yield chain
 
     async def get_reply_chain(self, message, max_messages=None):
         """
@@ -227,7 +294,7 @@ class ConversationManager:
 
     async def get_llm_response(self, messages):
         """
-        Get response from the LLM with token trimming.
+        Get response from the LLM agent with MCP tools and token trimming.
 
         Args:
             messages: List of formatted messages for the LLM
@@ -236,8 +303,30 @@ class ConversationManager:
             str: LLM response content
         """
         try:
-            response = await self.chain.ainvoke(messages)
-            return response.content
+            # Trim messages to avoid token limits
+            trimmed_messages = self.trimmer.invoke(messages)
+            
+            # Convert to the format expected by the agent
+            agent_messages = []
+            for msg in trimmed_messages:
+                if isinstance(msg, SystemMessage):
+                    # System message is handled by the agent's prompt
+                    continue
+                elif isinstance(msg, HumanMessage):
+                    agent_messages.append({"role": "user", "content": msg.content})
+                elif isinstance(msg, AIMessage):
+                    agent_messages.append({"role": "assistant", "content": msg.content})
+
+            async with self.get_agent() as agent:
+                if self.mcp_servers:
+                    # Use agent with MCP tools
+                    response = await agent.ainvoke({"messages": agent_messages})
+                    return response["messages"][-1].content
+                else:
+                    # Fallback to simple chain
+                    response = await agent.ainvoke(trimmed_messages)
+                    return response.content
+                    
         except Exception as e:
             print(f"Error getting LLM response: {e}")
             return "I'm sorry, I encountered an error while processing your request."
@@ -273,21 +362,43 @@ class ConversationManager:
         Returns:
             dict: Configuration summary
         """
-        return {
+        summary = {
             "max_messages": self.max_messages,
             "max_time_window_minutes": self.max_time_window_minutes,
             "max_tokens": self.max_tokens,
-            "has_token_trimming": self.chain is not None,
-            "llm-class": type(self.llm).__name__ if self.llm else "None",
-            "system_prompt": self.system_prompt,
+            "has_token_trimming": self.trimmer is not None,
+            "llm_class": type(self.llm).__name__ if self.llm else "None",
+            "system_prompt": self.system_prompt[:100] + "..." if len(self.system_prompt) > 100 else self.system_prompt,
+            "mcp_servers": list(self.mcp_servers.keys()) if self.mcp_servers else [],
         }
+        
+        # Add tool filtering information for each server
+        tool_filtering_info = {}
+        for server_name, server_config in self.mcp_servers.items():
+            tool_config = server_config.get('tools', {})
+            if tool_config:
+                filter_mode = tool_config.get('mode', 'none')
+                filter_info = {"mode": filter_mode}
+                
+                if filter_mode == 'allow':
+                    filter_info["allowlist"] = tool_config.get('allowlist', [])
+                elif filter_mode == 'ban':
+                    filter_info["banlist"] = tool_config.get('banlist', [])
+                    
+                tool_filtering_info[server_name] = filter_info
+                
+        if tool_filtering_info:
+            summary["tool_filtering"] = tool_filtering_info
+        
+        return summary
 
 
 # Initialize the conversation manager with custom settings
 conversation_manager = ConversationManager(
     llm=first_llm,
     system_prompt=system_prompt,
-    discord_client=client,
+    discord_client=bot,
+    mcp_servers=config.get('mcpServers', {}),  # Pass MCP servers configuration
     max_messages=15,  # Allow more messages for better context
     max_time_window_minutes=45,  # Longer time window for channel mode
     max_tokens=4096,  # Standard token limit for most models
@@ -365,14 +476,14 @@ async def send_long_response(message, response_text, max_length=2000):
     return last_message
 
 
-@client.event
+@bot.event
 async def on_ready():
-    print(f"We have logged in as {client.user}")
+    print(f"We have logged in as {bot.user}")
 
 
-@client.event
+@bot.event
 async def on_message(message):
-    if message.author == client.user:
+    if message.author == bot.user:
         return
 
     # Check if this message is part of a reply chain
@@ -381,7 +492,7 @@ async def on_message(message):
             replied_message = await message.channel.fetch_message(
                 message.reference.message_id
             )
-            if replied_message.author == client.user:
+            if replied_message.author == bot.user:
                 # Get conversation formatted for LLM using replies mode
                 formatted_messages = await conversation_manager.get_reply_conversation(
                     message
@@ -392,9 +503,7 @@ async def on_message(message):
                     # Get LLM response
                     llm_response = await conversation_manager.get_llm_response(
                         formatted_messages
-                    )
-
-                # Send response (potentially split into multiple messages)
+                    )                # Send response (potentially split into multiple messages)
                 await send_long_response(message, llm_response)
 
                 print(f"LLM Response: {llm_response}")
@@ -402,13 +511,14 @@ async def on_message(message):
             pass
 
     # Check if bot is mentioned, but don't double-reply if it's already handled in reply chain
-    elif client.user.mentioned_in(message):
+    elif bot.user.mentioned_in(message):
         # Get conversation formatted for LLM using channel mode for recent context
         formatted_messages = await conversation_manager.get_channel_conversation(
             message
         )
+        
         print(f"Channel conversation context: {len(formatted_messages)} messages")
-
+        
         # Show typing indicator while getting LLM response
         async with message.channel.typing():
             # Get LLM response
@@ -419,6 +529,7 @@ async def on_message(message):
         # Send response (potentially split into multiple messages)
         await send_long_response(message, llm_response)
 
+    # Handle debug commands
     if message.content.startswith("$hello"):
         await message.channel.send("Hello!")
     elif message.content.startswith("$config"):
@@ -427,7 +538,201 @@ async def on_message(message):
         await message.channel.send(
             f"**Bot Configuration:**\n```json\n{config_text}\n```"
         )
+    elif message.content.startswith("$tools"):
+        # Show available tools (requires MCP servers to be configured)
+        if conversation_manager.mcp_servers:
+            try:
+                # Get tools directly from the MCP client instead of from agent
+                async with MultiServerMCPClient(conversation_manager.mcp_servers) as mcp_client:
+                    all_tools = mcp_client.get_tools()
+                    
+                    # Apply the same filtering logic as in get_agent
+                    filtered_tools = []
+                    for tool in all_tools:
+                        tool_name = tool.name
+                        should_include = True
+                        
+                        # Check each server's tool filtering configuration
+                        for server_name, server_config in conversation_manager.mcp_servers.items():
+                            tool_config = server_config.get('tools', {})
+                            if not tool_config:
+                                continue
+                                
+                            mode = tool_config.get('mode', 'none')
+                            
+                            if mode == 'allow':
+                                allowlist = tool_config.get('allowlist', [])
+                                if tool_name not in allowlist:
+                                    should_include = False
+                                    break
+                            elif mode == 'ban':
+                                banlist = tool_config.get('banlist', [])
+                                if tool_name in banlist:
+                                    should_include = False
+                                    break
+                        
+                        if should_include:
+                            filtered_tools.append(tool)
+                    
+                    if filtered_tools:
+                        tool_info = []
+                        for tool in filtered_tools:
+                            tool_name = tool.name
+                            tool_description = getattr(tool, 'description', 'No description available')
+                            tool_info.append(f"• **{tool_name}**: {tool_description}")
+                        
+                        tools_text = "\n".join(tool_info)
+                          # Get filtering info from server configurations
+                        filter_info = []
+                        for server_name, server_config in conversation_manager.mcp_servers.items():
+                            tool_config = server_config.get('tools', {})
+                            if tool_config:
+                                mode = tool_config.get('mode', 'none')
+                                filter_info.append(f"{server_name}: {mode}")
+                        
+                        filter_summary = ", ".join(filter_info) if filter_info else "none"
+                        response = f"**Available MCP Tools** (Filtering: {filter_summary}):\n{tools_text}\n\n**Total:** {len(filtered_tools)}/{len(all_tools)} tools available"
+                        
+                        if len(response) > 2000:
+                            # Split long responses
+                            await send_long_response(message, response)
+                        else:
+                            await message.channel.send(response)
+                    else:
+                        await message.channel.send("No tools available after filtering.")
+            except Exception as e:
+                await message.channel.send(f"Error getting tool information: {e}")
+        else:
+            await message.channel.send("No MCP servers configured. Tools are not available.")
+
+    # Process commands (required for slash commands to work alongside message events)
+    await bot.process_commands(message)
+
+
+# Slash commands
+@bot.slash_command(name="tools", description="Show available MCP tools with filtering information")
+async def tools_slash(ctx):
+    """Show available tools as a slash command"""
+    await ctx.defer()  # Important for commands that might take time
+    
+    if conversation_manager.mcp_servers:
+        try:
+            # Get tools directly from the MCP client instead of from agent
+            async with MultiServerMCPClient(conversation_manager.mcp_servers) as mcp_client:
+                all_tools = mcp_client.get_tools()
+                
+                # Apply the same filtering logic as in get_agent
+                filtered_tools = []
+                for tool in all_tools:
+                    tool_name = tool.name
+                    should_include = True
+                    
+                    # Check each server's tool filtering configuration
+                    for server_name, server_config in conversation_manager.mcp_servers.items():
+                        tool_config = server_config.get('tools', {})
+                        if not tool_config:
+                            continue
+                            
+                        mode = tool_config.get('mode', 'none')
+                        
+                        if mode == 'allow':
+                            allowlist = tool_config.get('allowlist', [])
+                            if tool_name not in allowlist:
+                                should_include = False
+                                break
+                        elif mode == 'ban':
+                            banlist = tool_config.get('banlist', [])
+                            if tool_name in banlist:
+                                should_include = False
+                                break
+                    
+                    if should_include:
+                        filtered_tools.append(tool)
+                
+                if filtered_tools:
+                    tool_info = []
+                    for tool in filtered_tools:
+                        tool_name = tool.name
+                        tool_description = getattr(tool, 'description', 'No description available')
+                        tool_info.append(f"• **{tool_name}**: {tool_description}")
+                    
+                    tools_text = "\n".join(tool_info)
+                    
+                    # Get filtering info from server configurations
+                    filter_info = []
+                    for server_name, server_config in conversation_manager.mcp_servers.items():
+                        tool_config = server_config.get('tools', {})
+                        if tool_config:
+                            mode = tool_config.get('mode', 'none')
+                            filter_info.append(f"{server_name}: {mode}")
+                    
+                    filter_summary = ", ".join(filter_info) if filter_info else "none"
+                    response = f"**Available MCP Tools** (Filtering: {filter_summary}):\n{tools_text}\n\n**Total:** {len(filtered_tools)}/{len(all_tools)} tools available"
+                    
+                    if len(response) > 2000:
+                        # Split long responses using followup for slash commands
+                        await ctx.followup.send(response[:2000])
+                        remaining = response[2000:]
+                        while remaining:
+                            chunk = remaining[:2000]
+                            remaining = remaining[2000:]
+                            await ctx.followup.send(chunk)
+                    else:
+                        await ctx.followup.send(response)
+                else:
+                    await ctx.followup.send("No tools available after filtering.")
+        except Exception as e:
+            await ctx.followup.send(f"Error getting tool information: {e}")
+    else:
+        await ctx.followup.send("No MCP servers configured. Tools are not available.")
+
+@bot.slash_command(name="config", description="Show bot configuration")
+async def config_slash(ctx):
+    """Show bot configuration as a slash command"""
+    await ctx.defer()
+    
+    config_summary = conversation_manager.get_config_summary()
+    config_text = json.dumps(config_summary, indent=2)
+    response = f"**Bot Configuration:**\n```json\n{config_text}\n```"
+    
+    if len(response) > 2000:
+        await ctx.followup.send("**Bot Configuration:**\n```json")
+        await ctx.followup.send(config_text[:1900] + "\n```")
+        if len(config_text) > 1900:
+            await ctx.followup.send("```json\n" + config_text[1900:] + "\n```")
+    else:
+        await ctx.followup.send(response)
+
+@bot.slash_command(name="hello", description="Say hello!")
+async def hello_slash(ctx):
+    """Simple hello command as a slash command"""
+    await ctx.respond("Hello! 👋")
+
+@bot.event
+async def on_connect():
+    if bot.auto_sync_commands:
+        await bot.sync_commands(register_guild_commands=True, guild_ids=[675538935472062479])
+    print(f"{bot.user.name} connected.")
+
+
+# Text-based commands (keeping for backwards compatibility)
 
 
 def main():
-    client.run(os.getenv("DISCORD_TOKEN"))
+    """Main function to start the Discord bot"""
+    try:
+        # Get the Discord token from configuration
+        discord_token = os.getenv("DISCORD_TOKEN")
+        if not discord_token:
+            print("Discord token not found in configuration!")
+            return
+        
+        print("Starting Discord MCP Bot...")
+        bot.run(discord_token)
+    except Exception as e:
+        print(f"Failed to start bot: {e}")
+        raise
+
+
+if __name__ == "__main__":
+    main()
