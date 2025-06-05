@@ -2,15 +2,16 @@ import importlib
 from langgraph.prebuilt import create_react_agent
 from contextlib import asynccontextmanager
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import SystemMessage, HumanMessage
+
 
 def get_llm(config):
     """
     Get the LLM instance based on the configuration.
-    
+
     Args:
         config (dict): Configuration settings.
-    
+
     Returns:
         object: LLM instance.
     """
@@ -18,6 +19,7 @@ def get_llm(config):
     llm_class = getattr(llm_module, config["class"])
     llm_instance = llm_class(**config["params"])
     return llm_instance
+
 
 def get_prompt(file_path):
     """
@@ -27,18 +29,19 @@ def get_prompt(file_path):
     Returns:
         str: Prompt content.
     """
-    with open(file_path, 'r') as file:
+    with open(file_path, "r") as file:
         prompt = file.read()
     return prompt
+
 
 def get_tools(agent_tools, tool_configs) -> list:
     """
     Get the tools based on the configuration.
-    
+
     Args:
         agent_tools (list): List of tools to be used by the agent.
         tool_configs (list): List of tool configurations.
-        
+
     Returns:
         list: Subset of tool configs.
     """
@@ -48,6 +51,7 @@ def get_tools(agent_tools, tool_configs) -> list:
         if tool_cfg:
             tools[tool] = tool_cfg
     return tools
+
 
 @asynccontextmanager
 async def get_agent(agent_config, llm_configs, tool_configs):
@@ -63,7 +67,7 @@ async def get_agent(agent_config, llm_configs, tool_configs):
         object: Agent instance.
     """
 
-    llm_config = llm_configs.get(agent_config['llm'])
+    llm_config = llm_configs.get(agent_config["llm"])
     llm = get_llm(llm_config)
     prompt = get_prompt(agent_config["prompt"])
     mcp_configs = get_tools(agent_config["mcpServers"], tool_configs)
@@ -76,6 +80,7 @@ async def get_agent(agent_config, llm_configs, tool_configs):
             prompt=prompt,
         )
         yield agent
+
 
 async def get_thread_name(llm_name, llm_configs, question):
     """
@@ -92,12 +97,15 @@ async def get_thread_name(llm_name, llm_configs, question):
     llm_config = llm_configs.get(llm_name)
     llm = get_llm(llm_config)
     prompt = get_prompt("prompts/thread_name.txt")
-    prompt = prompt if prompt.strip() else "You are a helpful assistant that summarizes questions or queries into Discord thread names."
+    prompt = (
+        prompt
+        if prompt.strip()
+        else "You are a helpful assistant that summarizes questions or queries into Discord thread names."
+    )
 
     response = await llm.invoke(
         {
-            "messages": [SystemMessage(content=prompt),
-                         HumanMessage(content=question)],
+            "messages": [SystemMessage(content=prompt), HumanMessage(content=question)],
         }
     )
     return response.content
