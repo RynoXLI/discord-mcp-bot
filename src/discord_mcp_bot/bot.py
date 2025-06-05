@@ -41,14 +41,14 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 # Use commands.Bot instead of discord.Client to support slash commands
-bot = commands.Bot(command_prefix='$', intents=intents)
+bot = commands.Bot(command_prefix="$", intents=intents)
 
 # Initialize the conversation manager with custom settings
 conversation_manager = ConversationManager(
     llm=first_llm,
     system_prompt=system_prompt,
     discord_client=bot,
-    mcp_servers=config.get('mcpServers', {}),  # Pass MCP servers configuration
+    mcp_servers=config.get("mcpServers", {}),  # Pass MCP servers configuration
     max_messages=15,  # Allow more messages for better context
     max_time_window_minutes=45,  # Longer time window for channel mode
     max_tokens=4096,  # Standard token limit for most models
@@ -75,7 +75,7 @@ def main():
         if not discord_token:
             print("Discord token not found in configuration!")
             return
-        
+
         print("Starting Discord MCP Bot...")
         bot.run(discord_token)
     except Exception as e:

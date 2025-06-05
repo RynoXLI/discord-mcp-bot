@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "langchain-mcp-adapters>=0.0.9",
+    "langchain-ollama>=0.3.3",
     "langchain-openai>=0.3.14",
     "langgraph>=0.3.34",
     "py-cord>=2.6.1",

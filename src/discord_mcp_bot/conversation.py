@@ -5,9 +5,10 @@ This module handles conversation context, message formatting, and LLM interactio
 """
 
 import logging
+import re
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import discord
 from langchain_core.messages import (
@@ -27,7 +28,7 @@ class ConversationManager:
     """
     Manages conversation context and LLM interactions for the Discord bot using an agent with MCP tools.
     """
-    
+
     def __init__(
         self,
         llm,
@@ -50,7 +51,7 @@ class ConversationManager:
             max_time_window_minutes: Default time window for channel mode (in minutes)
             max_tokens: Maximum tokens for LLM context trimming
         """
-        
+
         self.llm = llm
         self.system_prompt = system_prompt
         self.discord_client = discord_client
@@ -58,7 +59,7 @@ class ConversationManager:
         self.max_messages = max_messages
         self.max_time_window_minutes = max_time_window_minutes
         self.max_tokens = max_tokens
-        
+
         # Create a trimmer for token management
         self.trimmer = trim_messages(
             strategy="last",
@@ -71,7 +72,7 @@ class ConversationManager:
     async def get_agent(self):
         """
         Create and yield an agent with MCP tools, applying tool filtering.
-        
+
         Returns:
             Agent instance with filtered MCP tools
         """
@@ -79,35 +80,35 @@ class ConversationManager:
             async with MultiServerMCPClient(self.mcp_servers) as mcp_client:
                 # Get all available tools
                 all_tools = mcp_client.get_tools()
-                
+
                 # Apply tool filtering for each server
                 filtered_tools = []
                 for tool in all_tools:
                     tool_name = tool.name
                     # Find which server this tool belongs to by checking tool configurations
                     should_include = True
-                    
+
                     # Check each server's tool filtering configuration
                     for server_name, server_config in self.mcp_servers.items():
-                        tool_config = server_config.get('tools', {})
+                        tool_config = server_config.get("tools", {})
                         if not tool_config:
                             continue
-                            
-                        mode = tool_config.get('mode', 'none')
-                        tool_list = tool_config.get('list', [])
-                        
-                        if mode == 'allow':
+
+                        mode = tool_config.get("mode", "none")
+                        tool_list = tool_config.get("list", [])
+
+                        if mode == "allow":
                             if tool_name not in tool_list:
                                 should_include = False
                                 break
-                        elif mode == 'ban':
+                        elif mode == "ban":
                             if tool_name in tool_list:
                                 should_include = False
                                 break
-                    
+
                     if should_include:
                         filtered_tools.append(tool)
-                
+
                 agent = create_react_agent(
                     model=self.llm,
                     tools=filtered_tools,
@@ -119,7 +120,9 @@ class ConversationManager:
             chain = self.trimmer | self.llm
             yield chain
 
-    async def get_reply_chain(self, message: discord.Message, max_messages: Optional[int] = None) -> List[discord.Message]:
+    async def get_reply_chain(
+        self, message: discord.Message, max_messages: Optional[int] = None
+    ) -> List[discord.Message]:
         """
         Get the reply chain for a message by traversing backwards.
 
@@ -155,10 +158,10 @@ class ConversationManager:
         return chain
 
     async def get_recent_channel_messages(
-        self, 
-        message: discord.Message, 
-        max_messages: Optional[int] = None, 
-        time_window_minutes: Optional[int] = None
+        self,
+        message: discord.Message,
+        max_messages: Optional[int] = None,
+        time_window_minutes: Optional[int] = None,
     ) -> List[discord.Message]:
         """
         Get recent channel messages within a time window.
@@ -239,11 +242,11 @@ class ConversationManager:
         return messages
 
     async def get_conversation_for_llm(
-        self, 
-        message: discord.Message, 
-        mode: str = "replies", 
-        max_messages: Optional[int] = None, 
-        time_window_minutes: Optional[int] = None
+        self,
+        message: discord.Message,
+        mode: str = "replies",
+        max_messages: Optional[int] = None,
+        time_window_minutes: Optional[int] = None,
     ) -> List:
         """
         Get conversation context and format it for LLM processing.
@@ -274,7 +277,7 @@ class ConversationManager:
 
         return self.format_messages_for_llm(msgs)
 
-    async def get_llm_response(self, messages: List) -> str:
+    async def get_llm_response(self, messages: List) -> Tuple[str, Optional[str]]:
         """
         Get response from the LLM agent with MCP tools and token trimming.
 
@@ -282,12 +285,12 @@ class ConversationManager:
             messages: List of formatted messages for the LLM
 
         Returns:
-            str: LLM response content
+            Tuple of (clean_response, thoughts) where thoughts is None if no thinking found
         """
         try:
             # Trim messages to avoid token limits
             trimmed_messages = self.trimmer.invoke(messages)
-            
+
             # Convert to the format expected by the agent
             agent_messages = []
             for msg in trimmed_messages:
@@ -302,7 +305,9 @@ class ConversationManager:
                         username_part = content.split(":", 1)[0]
                         if "(ID:" in username_part:
                             username = username_part.split("(ID:")[0].strip()
-                            agent_messages.append({"role": username, "content": content})
+                            agent_messages.append(
+                                {"role": username, "content": content}
+                            )
                         else:
                             agent_messages.append({"role": "user", "content": content})
                     else:
@@ -314,15 +319,19 @@ class ConversationManager:
                 if self.mcp_servers:
                     # Use agent with MCP tools
                     response = await agent.ainvoke({"messages": agent_messages})
-                    return response["messages"][-1].content
+                    raw_response = response["messages"][-1].content
                 else:
                     # Fallback to simple chain
                     response = await agent.ainvoke(trimmed_messages)
-                    return response.content
-                    
+                    raw_response = response.content
+                
+                # Extract thoughts from the response
+                clean_response, thoughts = self.extract_thoughts(raw_response)
+                return clean_response, thoughts
+
         except Exception as e:
             logger.error(f"Error getting LLM response: {e}")
-            return "I'm sorry, I encountered an error while processing your request."
+            return "I'm sorry, I encountered an error while processing your request.", None
 
     async def get_reply_conversation(self, message: discord.Message) -> List:
         """
@@ -348,6 +357,44 @@ class ConversationManager:
         """
         return await self.get_conversation_for_llm(message, mode="channel")
 
+    async def get_conversation_history(self, message: discord.Message):
+        """
+        Get conversation history for a message using the reply chain approach.
+        
+        Args:
+            message: The Discord message to get history for
+            
+        Returns:
+            List of Discord messages in chronological order
+        """
+        return await self.get_reply_chain(message)
+    
+    async def add_to_history(self, message: discord.Message, response: str):
+        """
+        Add a message and its response to conversation history.
+        This is a placeholder method as we're using a stateless approach with reply chains.
+        For a full implementation, you would store this in a database or memory.
+        
+        Args:
+            message: The Discord message
+            response: The bot's response
+        """
+        # This is a no-op in the current implementation since we rely on
+        # Discord's built-in reply functionality for history tracking
+        pass
+    
+    def format_chat_history_for_llm(self, discord_messages: List[discord.Message]) -> List:
+        """
+        Format chat history for the LLM. This is an alias for format_messages_for_llm.
+        
+        Args:
+            discord_messages: List of Discord message objects
+            
+        Returns:
+            List of LangChain message objects formatted for the LLM
+        """
+        return self.format_messages_for_llm(discord_messages)
+
     def get_config_summary(self) -> dict:
         """
         Get a summary of the conversation manager configuration.
@@ -361,24 +408,54 @@ class ConversationManager:
             "max_tokens": self.max_tokens,
             "has_token_trimming": self.trimmer is not None,
             "llm_class": type(self.llm).__name__ if self.llm else "None",
-            "system_prompt": self.system_prompt[:100] + "..." if len(self.system_prompt) > 100 else self.system_prompt,
+            "system_prompt": self.system_prompt[:100] + "..."
+            if len(self.system_prompt) > 100
+            else self.system_prompt,
             "mcp_servers": list(self.mcp_servers.keys()) if self.mcp_servers else [],
-        }
-        
-        # Add tool filtering information for each server
+        }        # Add tool filtering information for each server
         tool_filtering_info = {}
         for server_name, server_config in self.mcp_servers.items():
-            tool_config = server_config.get('tools', {})
+            tool_config = server_config.get("tools", {})
             if tool_config:
-                filter_mode = tool_config.get('mode', 'none')
+                filter_mode = tool_config.get("mode", "none")
                 filter_info = {"mode": filter_mode}
-                
-                if filter_mode in ['allow', 'ban']:
-                    filter_info["list"] = tool_config.get('list', [])
-                    
+
+                if filter_mode in ["allow", "ban"]:
+                    filter_info["list"] = tool_config.get("list", [])
+
                 tool_filtering_info[server_name] = filter_info
-                
+
         if tool_filtering_info:
             summary["tool_filtering"] = tool_filtering_info
-        
+
         return summary
+
+    def extract_thoughts(self, response: str) -> Tuple[str, Optional[str]]:
+        """
+        Extract thinking process from LLM response if present.
+
+        Args:
+            response: The full LLM response containing potential <think> tags
+
+        Returns:
+            Tuple of (clean_response, thoughts) where thoughts is None if no thinking found
+        """
+        # Pattern to match <think>...</think> tags (case insensitive, multiline)
+        think_pattern = r"<think>(.*?)</think>"
+
+        # Find all thinking blocks
+        thoughts_matches = re.findall(think_pattern, response, re.DOTALL | re.IGNORECASE)
+
+        if thoughts_matches:
+            # Combine all thinking blocks
+            thoughts = "\n\n".join(match.strip() for match in thoughts_matches)
+
+            # Remove all thinking blocks from the response
+            clean_response = re.sub(think_pattern, "", response, flags=re.DOTALL | re.IGNORECASE)
+
+            # Clean up extra whitespace and newlines
+            clean_response = re.sub(r"\n\s*\n\s*\n", "\n\n", clean_response.strip())
+
+            return clean_response, thoughts
+
+        return response, None

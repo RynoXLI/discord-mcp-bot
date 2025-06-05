@@ -17,7 +17,9 @@ from .config import load_config
 logger = logging.getLogger(__name__)
 
 
-async def send_long_response(message: discord.Message, response_text: str, max_length: int = 2000) -> Optional[discord.Message]:
+async def send_long_response(
+    message: discord.Message, response_text: str, max_length: int = 2000
+) -> Optional[discord.Message]:
     """
     Send a long response, splitting it into multiple messages if necessary.
 
@@ -82,28 +84,28 @@ async def send_long_response(message: discord.Message, response_text: str, max_l
 def save_config(config_data: dict, file_path: str = "configuration.yml") -> None:
     """
     Save configuration back to YAML file.
-    
+
     Args:
         config_data: Configuration data to save
         file_path: Path to configuration file
     """
-    with open(file_path, 'w') as file:
+    with open(file_path, "w") as file:
         yaml.dump(config_data, file, default_flow_style=False, indent=2)
 
 
 async def get_available_tools(mcp_servers: dict) -> List[str]:
     """
     Get all available tools from MCP servers.
-    
+
     Args:
         mcp_servers: Dictionary of MCP server configurations
-        
+
     Returns:
         List of tool names
     """
     if not mcp_servers:
         return []
-    
+
     try:
         async with MultiServerMCPClient(mcp_servers) as mcp_client:
             return [tool.name for tool in mcp_client.get_tools()]
@@ -112,29 +114,31 @@ async def get_available_tools(mcp_servers: dict) -> List[str]:
         return []
 
 
-def reload_conversation_manager(conversation_manager, config_file: str = "configuration.yml") -> None:
+def reload_conversation_manager(
+    conversation_manager, config_file: str = "configuration.yml"
+) -> None:
     """
     Reload the conversation manager with updated config.
-    
+
     Args:
         conversation_manager: The conversation manager instance to update
         config_file: Path to configuration file
     """
     # Reload config from file
     config = load_config(config_file)
-    conversation_manager.mcp_servers = config.get('mcpServers', {})
+    conversation_manager.mcp_servers = config.get("mcpServers", {})
 
 
 def print_startup_info(config: dict, conversation_manager) -> None:
     """
     Print bot configuration summary on startup.
-    
+
     Args:
         config: Configuration dictionary
         conversation_manager: ConversationManager instance
     """
     llm_config = config.get("llm", {})
-    
+
     print("Bot Configuration:")
     print(
         f"  LLM: {llm_config.get('class', 'None')} ({llm_config.get('params', {}).get('model', 'unknown model')})"
@@ -147,10 +151,10 @@ def print_startup_info(config: dict, conversation_manager) -> None:
 def get_discord_token() -> str:
     """
     Get Discord token from environment variables.
-    
+
     Returns:
         Discord token string
-        
+
     Raises:
         ValueError: If token is not found
     """
