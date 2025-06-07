@@ -15,6 +15,13 @@ from .config import load_config
 from .llm import get_llm, get_prompt
 from .conversation import ConversationManager
 from .commands import BotCommands
+from phoenix.otel import register
+
+# configure the Phoenix tracer
+tracer_provider = register(
+  project_name=os.getenv("PHOENIX_PROJECT_NAME", 'discord-bot'), # Default is 'default'
+  auto_instrument=True # Auto-instrument your app based on installed OI dependencies
+)
 
 load_dotenv()
 
@@ -30,12 +37,9 @@ llm_config = config.get("llm", {})
 first_llm = get_llm(llm_config) if llm_config else None
 
 # Load system prompt from configuration or file
-try:
-    # Try to get system prompt file path from config first
-    system_prompt_file = config.get("system_prompt", "prompts/default.txt")
-    system_prompt = get_prompt(system_prompt_file)
-except FileNotFoundError:
-    system_prompt = "You are a discord bot, your job is to help users to the best of your ability. Please respond in discord markdown format. When responding to users, you have access to their Discord user IDs in the format 'Username (ID: 123456789)'. If you want to mention a specific user in your response, use the format <@123456789> to create a proper Discord mention."
+system_prompt_file = config.get("system_prompt", {}).get("file", "prompts/default.txt")
+system_prompt = get_prompt(system_prompt_file)
+system_prompt = system_prompt.strip() if system_prompt else "You are a helpful assistant."
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -49,9 +53,9 @@ conversation_manager = ConversationManager(
     system_prompt=system_prompt,
     discord_client=bot,
     mcp_servers=config.get("mcpServers", {}),  # Pass MCP servers configuration
-    max_messages=15,  # Allow more messages for better context
-    max_time_window_minutes=45,  # Longer time window for channel mode
-    max_tokens=4096,  # Standard token limit for most models
+    max_messages=config.get("max_recent_messages", 10),  # Allow more messages for better context
+    max_time_window_minutes=config.get("max_recent_time_window_minutes", 30),  # Longer time window for channel mode
+    max_tokens=config.get("max_tokens", 1000),  # Standard token limit for most models
 )
 
 # Print configuration summary on startup
@@ -61,7 +65,7 @@ print(
 )
 print(f"  System Prompt: {config.get('system_prompt', 'default')}")
 print(f"  MCP Servers: {list(config.get('mcpServers', {}).keys())}")
-print(f"  Conversation Manager: {conversation_manager.get_config_summary()}")
+# print(f"  Conversation Manager: {conversation_manager.get_config_summary()}")
 
 # Initialize bot commands
 bot_commands = BotCommands(bot, conversation_manager, config)

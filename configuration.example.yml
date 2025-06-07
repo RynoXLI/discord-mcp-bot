@@ -73,3 +73,19 @@ discord:
           - channel4
         bots:
           - bot1
+  # fileserver:
+  #   args:
+  #   - -y
+  #   - '@modelcontextprotocol/server-filesystem'
+  #   - /mnt/s/code/mcp-bot/discord-mcp-bot
+  #   command: npx
+  #   tools:
+  #     list:
+  #     - read_file
+  #     - read_multiple_files
+  #     - list_directory
+  #     - get_file_info
+  #     - list_allowed_directories
+  #     - edit_file
+  #     - write_file
+  #     mode: allow

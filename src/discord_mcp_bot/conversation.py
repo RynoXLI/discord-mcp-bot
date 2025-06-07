@@ -60,6 +60,14 @@ class ConversationManager:
         self.max_time_window_minutes = max_time_window_minutes
         self.max_tokens = max_tokens
 
+        # Check if LLM supports tools
+        self.tools_supported = self._check_tools_support()
+        if not self.tools_supported:
+            logger.warning(
+                f"LLM {type(self.llm).__name__} does not support bind_tools. MCP tools will be disabled."
+            )
+            self.mcp_servers = {}  # Disable MCP servers if tools aren't supported
+            
         # Create a trimmer for token management
         self.trimmer = trim_messages(
             strategy="last",
@@ -68,18 +76,28 @@ class ConversationManager:
             token_counter=count_tokens_approximately,
         )
 
+    def _check_tools_support(self) -> bool:
+        """
+        Check if the LLM supports bind_tools method.
+        
+        Returns:
+            bool: True if the LLM supports tools, False otherwise
+        """
+        return hasattr(self.llm, 'bind_tools') and callable(getattr(self.llm, 'bind_tools', None))
+
     @asynccontextmanager
     async def get_agent(self):
         """
         Create and yield an agent with MCP tools, applying tool filtering.
 
         Returns:
-            Agent instance with filtered MCP tools
+            Agent instance with filtered MCP tools or simple chain if tools not supported
         """
-        if self.mcp_servers:
+        if self.mcp_servers and self.tools_supported:
             async with MultiServerMCPClient(self.mcp_servers) as mcp_client:
                 # Get all available tools
                 all_tools = mcp_client.get_tools()
+                self.all_tools = all_tools  # Store for later use
 
                 # Apply tool filtering for each server
                 filtered_tools = []
@@ -90,6 +108,8 @@ class ConversationManager:
 
                     # Check each server's tool filtering configuration
                     for server_name, server_config in self.mcp_servers.items():
+                        tool.name = f"{server_name}_{tool.name}"
+                        print(tool_name)
                         tool_config = server_config.get("tools", {})
                         if not tool_config:
                             continue
@@ -114,9 +134,10 @@ class ConversationManager:
                     tools=filtered_tools,
                     prompt=self.system_prompt,
                 )
+                self.tools = filtered_tools
                 yield agent
         else:
-            # Fallback to simple chain if no MCP servers
+            # Fallback to simple chain if no MCP servers or tools not supported
             chain = self.trimmer | self.llm
             yield chain
 
@@ -300,11 +321,13 @@ class ConversationManager:
                 elif isinstance(msg, HumanMessage):
                     # Extract username from the formatted content for the role
                     content = msg.content
+                    print(content)
                     if ":" in content and "(ID:" in content:
                         # Extract username from "Username (ID: 123456789): message"
                         username_part = content.split(":", 1)[0]
                         if "(ID:" in username_part:
                             username = username_part.split("(ID:")[0].strip()
+                            print(content)
                             agent_messages.append(
                                 {"role": username, "content": content}
                             )
@@ -314,9 +337,9 @@ class ConversationManager:
                         agent_messages.append({"role": "user", "content": content})
                 elif isinstance(msg, AIMessage):
                     agent_messages.append({"role": "assistant", "content": msg.content})
-
+                    
             async with self.get_agent() as agent:
-                if self.mcp_servers:
+                if self.mcp_servers and self.tools_supported:
                     # Use agent with MCP tools
                     response = await agent.ainvoke({"messages": agent_messages})
                     raw_response = response["messages"][-1].content
@@ -332,69 +355,7 @@ class ConversationManager:
         except Exception as e:
             logger.error(f"Error getting LLM response: {e}")
             return "I'm sorry, I encountered an error while processing your request.", None
-
-    async def get_reply_conversation(self, message: discord.Message) -> List:
-        """
-        Convenience method to get reply chain conversation using instance defaults.
-
-        Args:
-            message: The Discord message to start from
-
-        Returns:
-            List of LangChain message objects formatted for the LLM
-        """
-        return await self.get_conversation_for_llm(message, mode="replies")
-
-    async def get_channel_conversation(self, message: discord.Message) -> List:
-        """
-        Convenience method to get channel conversation using instance defaults.
-
-        Args:
-            message: The Discord message to start from
-
-        Returns:
-            List of LangChain message objects formatted for the LLM
-        """
-        return await self.get_conversation_for_llm(message, mode="channel")
-
-    async def get_conversation_history(self, message: discord.Message):
-        """
-        Get conversation history for a message using the reply chain approach.
         
-        Args:
-            message: The Discord message to get history for
-            
-        Returns:
-            List of Discord messages in chronological order
-        """
-        return await self.get_reply_chain(message)
-    
-    async def add_to_history(self, message: discord.Message, response: str):
-        """
-        Add a message and its response to conversation history.
-        This is a placeholder method as we're using a stateless approach with reply chains.
-        For a full implementation, you would store this in a database or memory.
-        
-        Args:
-            message: The Discord message
-            response: The bot's response
-        """
-        # This is a no-op in the current implementation since we rely on
-        # Discord's built-in reply functionality for history tracking
-        pass
-    
-    def format_chat_history_for_llm(self, discord_messages: List[discord.Message]) -> List:
-        """
-        Format chat history for the LLM. This is an alias for format_messages_for_llm.
-        
-        Args:
-            discord_messages: List of Discord message objects
-            
-        Returns:
-            List of LangChain message objects formatted for the LLM
-        """
-        return self.format_messages_for_llm(discord_messages)
-
     def get_config_summary(self) -> dict:
         """
         Get a summary of the conversation manager configuration.
@@ -408,25 +369,13 @@ class ConversationManager:
             "max_tokens": self.max_tokens,
             "has_token_trimming": self.trimmer is not None,
             "llm_class": type(self.llm).__name__ if self.llm else "None",
-            "system_prompt": self.system_prompt[:100] + "..."
+            "system_prompt": self.system_prompt
             if len(self.system_prompt) > 100
             else self.system_prompt,
             "mcp_servers": list(self.mcp_servers.keys()) if self.mcp_servers else [],
-        }        # Add tool filtering information for each server
-        tool_filtering_info = {}
-        for server_name, server_config in self.mcp_servers.items():
-            tool_config = server_config.get("tools", {})
-            if tool_config:
-                filter_mode = tool_config.get("mode", "none")
-                filter_info = {"mode": filter_mode}
-
-                if filter_mode in ["allow", "ban"]:
-                    filter_info["list"] = tool_config.get("list", [])
-
-                tool_filtering_info[server_name] = filter_info
-
-        if tool_filtering_info:
-            summary["tool_filtering"] = tool_filtering_info
+            "tools_supported": self.tools_supported,
+            "tools_filtering": [tool.name for tool in self.tools] if self.tools_supported else [],
+        }
 
         return summary
 

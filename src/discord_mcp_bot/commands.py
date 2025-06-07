@@ -10,6 +10,7 @@ from typing import Optional, Tuple # Added Optional, Tuple
 import discord
 from discord.ext import commands
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from .conversation import ConversationManager
 
 from .utils import (
     send_long_response,
@@ -78,7 +79,7 @@ class ThoughtsView(discord.ui.View):
 class BotCommands:
     """Class to organize bot commands and event handlers."""
 
-    def __init__(self, bot: commands.Bot, conversation_manager, config: dict):
+    def __init__(self, bot: commands.Bot, conversation_manager: ConversationManager, config: dict):
         self.bot = bot
         self.conversation_manager = conversation_manager
         self.config = config
@@ -112,8 +113,7 @@ class BotCommands:
             if not self.conversation_manager.mcp_servers:
                 embed = discord.Embed(
                     title="⚠️ No MCP Servers",
-                    description="No MCP servers configured. Tools are not available.",
-                    color=discord.Color.orange(),
+                    description="No MCP servers configured. Tools are not available.",                    color=discord.Color.orange(),
                 )
                 await ctx.followup.send(embed=embed)
                 return
@@ -125,7 +125,7 @@ class BotCommands:
                     all_tools = mcp_client.get_tools()
 
                     if mode == "all":
-                        await self._handle_tools_all_mode(ctx, all_tools)
+                        await self._handle_tools_all_mode(ctx, all_tools, mcp_client)
                     else:  # mode == "current"
                         await self._handle_tools_current_mode(ctx)
 
@@ -201,12 +201,13 @@ class BotCommands:
                     if len(system_prompt) > 100
                     else system_prompt
                 )
+                
                 embed.add_field(
                     name="📝 System Prompt",
                     value=f"```{prompt_preview}```",
                     inline=False,
                 )
-
+                
             embed.set_footer(text="Use /tools to see detailed tool configuration")
             await ctx.followup.send(embed=embed)
 
@@ -214,6 +215,17 @@ class BotCommands:
         async def hello_slash(ctx):
             """Simple hello command as a slash command"""
             await ctx.respond("Hello! 👋")
+
+        @self.bot.slash_command(name="new", description="Start a fresh conversation without previous history")
+        async def new_slash(ctx):
+            """Start a fresh conversation without looking at previous history"""
+            embed = discord.Embed(
+                title="🆕 Fresh Chat Started",
+                description="I'm ready for a new conversation! I won't reference any previous messages in this channel. What would you like to talk about?",
+                color=discord.Color.green(),
+            )
+            embed.set_footer(text="Reply to this message or mention me to continue the fresh conversation")
+            await ctx.respond(embed=embed)
 
         @self.bot.slash_command(
             name="set-mode", description="Set tool filtering mode and update the list"
@@ -258,7 +270,7 @@ class BotCommands:
             await ctx.defer()
             await self._handle_remove_tool(ctx, server, tool_name)
 
-    async def _handle_tools_all_mode(self, ctx, all_tools):
+    async def _handle_tools_all_mode(self, ctx, all_tools, mcp_client=None):
         """Handle the 'all' mode for tools command."""
         if all_tools:
             embed = discord.Embed(
@@ -267,27 +279,54 @@ class BotCommands:
                 color=discord.Color.blue(),
             )
 
-            tool_names = sorted([tool.name for tool in all_tools])
+            # Group tools by server
+            tools_by_server = {}
+            
+            # If we have the mcp_client, we can get tools by server
+            if mcp_client and hasattr(mcp_client, 'servers'):
+                for server_name in self.conversation_manager.mcp_servers.keys():
+                    try:
+                        server_tools = [tool for tool in all_tools if tool.name.startswith(f"{server_name}_")]
+                        if server_tools:
+                            tools_by_server[server_name] = sorted([tool.name.replace(f"{server_name}_", "", 1) for tool in server_tools])
+                    except Exception:
+                        # Fallback: group all tools under their server names if available
+                        pass
+            
+            # If we couldn't group by server, show all tools
+            if not tools_by_server:
+                tool_names = sorted([tool.name for tool in all_tools])
+                tools_by_server["All Servers"] = tool_names
 
-            # Group tools in chunks for better display
-            chunk_size = 20
-            for i in range(0, len(tool_names), chunk_size):
-                chunk = tool_names[i : i + chunk_size]
-                chunk_text = "\n".join([f"• `{tool}`" for tool in chunk])
-
-                field_name = f"Tools {i + 1}-{min(i + chunk_size, len(tool_names))}"
-                embed.add_field(name=field_name, value=chunk_text, inline=True)
-
-                # Discord has a limit of 25 fields per embed
-                if len(embed.fields) >= 24:
-                    break
-
-            if len(tool_names) > chunk_size * 24:
-                embed.add_field(
-                    name="Note",
-                    value=f"Showing first {chunk_size * 24} tools. Use `/tools current` to see filtering configuration.",
-                    inline=False,
-                )
+            # Display tools grouped by server
+            for server_name, tool_names in tools_by_server.items():
+                if not tool_names:
+                    continue
+                    
+                # Group tools in chunks for better display
+                chunk_size = 15
+                if len(tool_names) <= chunk_size:
+                    # For smaller lists, show inline
+                    tools_display = "\n".join([f"• `{tool}`" for tool in tool_names])
+                    embed.add_field(
+                        name=f"📡 {server_name} ({len(tool_names)} tools)",
+                        value=tools_display,
+                        inline=False
+                    )
+                else:
+                    # For larger lists, show as bullet points with truncation
+                    first_chunk = tool_names[:chunk_size]
+                    tools_display = "\n".join([f"• `{tool}`" for tool in first_chunk])
+                    
+                    if len(tool_names) > chunk_size:
+                        remaining = len(tool_names) - chunk_size
+                        tools_display += f"\n\n*...and {remaining} more tools*"
+                    
+                    embed.add_field(
+                        name=f"📡 {server_name} ({len(tool_names)} tools)",
+                        value=tools_display,
+                        inline=False
+                    )
 
             await ctx.followup.send(embed=embed)
         else:
@@ -311,15 +350,13 @@ class BotCommands:
 
             if tool_config:
                 filter_mode = tool_config.get("mode", "none")
-                tool_list = tool_config.get("list", [])
-
-                # Choose emoji based on mode
+                tool_list = tool_config.get("list", [])                # Choose emoji based on mode
                 mode_emoji = {"allow": "✅", "ban": "❌", "none": "🔓"}.get(
                     filter_mode, "❓"
                 )
 
                 field_value = f"{mode_emoji} **Mode:** `{filter_mode}`\n"
-
+                
                 if filter_mode in ["allow", "ban"] and tool_list:
                     list_name = "Allowed" if filter_mode == "allow" else "Banned"
                     # Display all tools without truncation
@@ -335,7 +372,7 @@ class BotCommands:
                             [f"• `{tool}`" for tool in tool_list[:15]]
                         )
                         if len(tool_list) > 15:
-                            tools_display += f"\n• ... and {len(tool_list) - 15} more"
+                            tools_display += f"\n\n*...and {len(tool_list) - 15} more tools*"
                         field_value += f"**{list_name} tools ({len(tool_list)}):**\n{tools_display}"
                 elif filter_mode in ["allow", "ban"]:
                     list_name = "Allowed" if filter_mode == "allow" else "Banned"
@@ -397,19 +434,21 @@ class BotCommands:
             )
 
             embed.add_field(name="Server", value=f"`{server}`", inline=True)
-            embed.add_field(name="New Mode", value=f"`{mode}`", inline=True)
-
+            embed.add_field(name="New Mode", value=f"`{mode}`", inline=True)            
             if mode == "none":
                 embed.add_field(name="Status", value="All tools allowed", inline=False)
             else:
                 list_desc = "allowed" if mode == "allow" else "banned"
+                
                 if len(current_list) <= 10:
                     list_summary = ", ".join([f"`{tool}`" for tool in current_list])
                 else:
-                    list_summary = ", ".join(
-                        [f"`{tool}`" for tool in current_list[:10]]
-                    )
-                    list_summary += f" ... and {len(current_list) - 10} more"
+                    # For larger lists, show as bullet points for better readability
+                    sorted_list = sorted(current_list)
+                    list_summary = "\n".join([f"• `{tool}`" for tool in sorted_list[:15]])
+                    
+                    if len(sorted_list) > 15:
+                        list_summary += f"\n\n*...and {len(sorted_list) - 15} more tools*"
 
                 if not current_list:
                     list_summary = "(empty)"
@@ -446,9 +485,7 @@ class BotCommands:
                     inline=False,
                 )
             await ctx.followup.send(embed=embed)
-            return
-
-        # Check if tool exists
+            return        # Check if tool exists
         available_tools = await get_available_tools(
             self.conversation_manager.mcp_servers
         )
@@ -459,16 +496,31 @@ class BotCommands:
                 color=discord.Color.red(),
             )
             if available_tools:
-                tools_preview = ", ".join(
-                    [f"`{tool}`" for tool in available_tools[:10]]
-                )
-                if len(available_tools) > 10:
-                    tools_preview += f" ... +{len(available_tools) - 10} more"
-                embed.add_field(
-                    name=f"Available Tools ({len(available_tools)} total)",
-                    value=tools_preview,
-                    inline=False,
-                )
+                sorted_tools = sorted(available_tools)
+                
+                # Calculate how many pages of tools to display
+                total_tools = len(sorted_tools)
+                tools_per_page = 15
+                total_pages = (total_tools + tools_per_page - 1) // tools_per_page  # Ceiling division
+                
+                # Show the first page of tools as bullet points
+                first_page_tools = sorted_tools[:tools_per_page]
+                tools_preview = "\n".join([f"• `{tool}`" for tool in first_page_tools])
+                
+                if total_tools > tools_per_page:
+                    # Add a note about additional tools
+                    remaining_tools = total_tools - tools_per_page
+                    embed.add_field(
+                        name=f"Available Tools (Page 1/{total_pages}, {total_tools} total)",
+                        value=f"{tools_preview}\n\n*Use `/tools all` to see all {total_tools} available tools*",
+                        inline=False,
+                    )
+                else:
+                    embed.add_field(
+                        name=f"Available Tools ({total_tools} total)",
+                        value=tools_preview,
+                        inline=False,
+                    )
             await ctx.followup.send(embed=embed)
             return
 
@@ -619,8 +671,7 @@ class BotCommands:
                 embed = discord.Embed(
                     title="❌ Configuration Error",
                     description=f"Error saving configuration: {e}",
-                    color=discord.Color.red(),
-                )
+                    color=discord.Color.red(),                )
                 await ctx.followup.send(embed=embed)
         else:
             embed = discord.Embed(
@@ -630,11 +681,23 @@ class BotCommands:
             )
 
             if tool_list:
-                tools_preview = ", ".join([f"`{tool}`" for tool in tool_list[:10]])
-                if len(tool_list) > 10:
-                    tools_preview += f" ... +{len(tool_list) - 10} more"
+                sorted_tools = sorted(tool_list)
+                
+                # Calculate how many tools to display
+                total_tools = len(sorted_tools)
+                tools_per_page = 15
+                
+                # Show the tools as bullet points
+                first_page_tools = sorted_tools[:tools_per_page]
+                tools_preview = "\n".join([f"• `{tool}`" for tool in first_page_tools])
+                
+                if total_tools > tools_per_page:
+                    # Add a note about additional tools
+                    remaining_tools = total_tools - tools_per_page
+                    tools_preview += f"\n\n*...and {remaining_tools} more tools*"
+                
                 embed.add_field(
-                    name=f"Current Tools in List ({len(tool_list)})",
+                    name=f"Current Tools in List ({total_tools})",
                     value=tools_preview,
                     inline=False,
                 )
@@ -662,6 +725,7 @@ class BotCommands:
             original_author=message.author,
             original_message_id=message.id
         )
+        
         embed = view.create_embed() # Initial embed state
         return embed, view
 
@@ -674,58 +738,53 @@ class BotCommands:
         await self.bot.change_presence(
             activity=discord.Game(name=self.config.get("status_message", "/help"))
         )
+        kwargs = self.config.get("system_prompt", {}).get("args", {})
+        kwargs.pop("bot_username", None)  # Remove bot_username if present
+        kwargs.pop("bot_userid", None)  # Remove bot_userid if present
+        self.conversation_manager.system_prompt = self.conversation_manager.system_prompt.format(bot_username=self.bot.user.name, bot_userid=self.bot.user.id, **kwargs)
+        logger.info("Bot system prompt set:")
+        logger.info(self.conversation_manager.system_prompt)  # Print the system prompt for debugging
 
+        # temp, but run once to get tools
+        async with self.conversation_manager.get_agent() as agent:
+            pass
+    
     async def on_connect(self):
         """Called when the bot connects."""
         logger.info("Bot connected to Discord.")
 
     async def on_message(self, message: discord.Message):
-        """Event handler for incoming messages."""
-        # Ignore messages from the bot itself
+        """Event handler for incoming messages."""        # Ignore messages from the bot itself
         if message.author == self.bot.user:
             return
-
-        # Check if the message is a reply to the bot
-        is_reply_to_bot = False
-        if message.reference and message.reference.message_id:
-            try:
-                replied_message = await message.channel.fetch_message(
-                    message.reference.message_id
-                )
-                if replied_message.author == self.bot.user:
-                    is_reply_to_bot = True
-            except discord.NotFound:
-                logger.warning(
-                    f"Replied message {message.reference.message_id} not found."
-                )
-            except discord.Forbidden:
-                logger.warning(
-                    f"Forbidden to fetch replied message {message.reference.message_id}."
-                )
-
+    
         # Process messages mentioning the bot or direct messages
         if (
             self.bot.user.mentioned_in(message)
             or isinstance(message.channel, discord.DMChannel)
-            or is_reply_to_bot
         ):
             async with message.channel.typing():
                 try:
-                    # Get or create conversation history
-                    history = await self.conversation_manager.get_conversation_history(
-                        message
-                    )
+                    # If the message is a reply, we can use the reference to get context
+                    if message.reference:
+                        history = await self.conversation_manager.get_reply_chain(message)
+                    else:
+                        history = await self.conversation_manager.get_recent_channel_messages(message)
+
+                    # Log the message history
+                    logger.info(f"Received request from {message.author.name} (ID: {message.author.id}) in {message.channel}")
+                    logger.info(f"Message history ({len(history)} messages):")
+                    for i, msg in enumerate(history):
+                        author = msg.author.name
+                        content = msg.content if len(msg.content) < 100 else f"{msg.content[:97]}..."
+                        logger.info(f"  [{i+1}] {author}: {content}")
+                    
                     formatted_messages = (
-                        self.conversation_manager.format_chat_history_for_llm(history)
+                        self.conversation_manager.format_messages_for_llm(history)
                     )
 
                     # Get LLM response
                     llm_response, thoughts = await self.conversation_manager.get_llm_response(formatted_messages)
-
-                    # Add current exchange to history
-                    await self.conversation_manager.add_to_history(
-                        message, llm_response
-                    )
                     
                     if thoughts:
                         embed, view = await self.create_response_with_thoughts(message, llm_response, thoughts)

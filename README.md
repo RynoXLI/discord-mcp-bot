@@ -15,3 +15,5 @@ MCP Servers are popping up quickly all throughout industry. With this in mind, t
  - Add MCP tool calls
     - Add ability to approve tool calls
 
+   - vibe coding is donzo 
+   - 
